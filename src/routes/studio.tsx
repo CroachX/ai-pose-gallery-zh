@@ -55,7 +55,7 @@ import {
   STYLE_PRESETS,
 } from '@/services/aiGenerator'
 import { poseImagePath, poseThumbPath, referenceImageUrl, uploadedReferences } from '@/lib/recipeImages'
-import { isGptImage2 } from '@/lib/gptImage'
+import { omitsInputFidelity } from '@/lib/gptImage'
 import { useStudio } from '@/store/studioStore'
 import type {
   ComfyUiParams,
@@ -118,7 +118,7 @@ function StudioPage() {
   const activeProvider = apiConfig.activeProvider
   const providerMeta = PROVIDER_META[activeProvider]
   const providerCfg = apiConfig.providers[activeProvider]
-  const fixedInputFidelity = isGptImage2(providerCfg.model === 'custom' ? providerCfg.customModel : providerCfg.model)
+  const omitInputFidelity = omitsInputFidelity(providerCfg.model === 'custom' ? providerCfg.customModel : providerCfg.model)
 
   const activeWorkflowImages = activeProvider === 'comfyui' && recipe.workflowImagesIdentity === workflowIdentity(apiConfig.comfyuiParams.workflowJson) ? Object.values(recipe.workflowImages || {}) : []
   const defaultPrompt = buildRecipePrompt(recipe, apiConfig.stylePreset, activeWorkflowImages)
@@ -1124,8 +1124,8 @@ function StudioPage() {
                       </Select>
                     </Field>
                     <Field label="参考还原度 (input_fidelity)">
-                      {fixedInputFidelity ? (
-                        <p className="text-sm text-muted-foreground">GPT Image 2 自动使用高还原度，无需设置。</p>
+                      {omitInputFidelity ? (
+                        <p className="text-sm text-muted-foreground">当前模型不支持此参数，无需设置。</p>
                       ) : <Select
                         value={apiConfig.gptParams.inputFidelity}
                         onValueChange={(v) =>

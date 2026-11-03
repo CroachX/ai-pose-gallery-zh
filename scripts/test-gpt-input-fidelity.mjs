@@ -17,7 +17,11 @@ let count = 0
 try {
   const { generateCharacterImage } = await server.ssrLoadModule('/src/services/aiGenerator.ts')
   for (const endpointMode of ['images_edits_json', 'images_edits', 'responses']) {
-    for (const model of ['gpt-image-2', 'gpt-image-2-2026-04-21', 'gpt-image-1.5']) {
+    for (const model of [
+      'gpt-image-2', 'gpt-image-2-2026-04-21',
+      'gpt-image-2.5', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-sunburst-2026-09-08',
+      'gpt-image-2.5-flare', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-1.5',
+    ]) {
       for (const inputFidelity of ['high', 'low']) {
         let captured
         globalThis.fetch = async (url, init) => {
@@ -58,7 +62,7 @@ try {
       }
     }
   }
-  console.log(`PASS: ${count} request cases (JSON, multipart, Responses; GPT Image 2, snapshot, 1.5; high/low)`)
+  console.log(`PASS: ${count} request cases (JSON, multipart, Responses; GPT Image 2/2.5 including Flare, Sunburst and snapshots; 1.5; high/low)`)
 } finally {
   globalThis.fetch = originalFetch
   await server.close()

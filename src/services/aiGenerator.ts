@@ -1,6 +1,7 @@
 import type { ApiConfig, ExtraReferenceImage, ImageProviderId, RecipeState } from '@/types/gallery'
 import { applyWorkflowOverrides, getWorkflowImages, validateReferenceCombinations, workflowIdentity, type ComfyObjectInfo } from '@/lib/comfyWorkflowParameters'
 import { poseImagePath, referenceImageUrl } from '@/lib/recipeImages'
+import { isGptImage2 } from '@/lib/gptImage'
 import qwen2509ThreeImageWorkflow from '@/workflows/qwen_image_edit_2509_3img.api.json'
 
 export interface ProviderModelOption {
@@ -1436,7 +1437,7 @@ export async function generateCharacterImage(params: {
       }
       if (g.size !== 'auto') payload.size = g.size
       if (g.quality !== 'auto') payload.quality = g.quality
-      if (g.inputFidelity) payload.input_fidelity = g.inputFidelity
+      if (!isGptImage2(model) && g.inputFidelity) payload.input_fidelity = g.inputFidelity
       if (g.background !== 'auto') payload.background = g.background
       if (g.outputFormat) payload.output_format = g.outputFormat
       if (g.moderation !== 'auto') payload.moderation = g.moderation
@@ -1464,7 +1465,7 @@ export async function generateCharacterImage(params: {
       })
       if (g.size !== 'auto') fd.append('size', g.size)
       if (g.quality !== 'auto') fd.append('quality', g.quality)
-      if (g.inputFidelity) fd.append('input_fidelity', g.inputFidelity)
+      if (!isGptImage2(model) && g.inputFidelity) fd.append('input_fidelity', g.inputFidelity)
       if (g.background !== 'auto') fd.append('background', g.background)
       if (g.outputFormat) fd.append('output_format', g.outputFormat)
       if (g.moderation !== 'auto') fd.append('moderation', g.moderation)
@@ -1489,7 +1490,7 @@ export async function generateCharacterImage(params: {
       if (g.size !== 'auto') toolCfg.size = g.size
       if (g.quality !== 'auto') toolCfg.quality = g.quality
       if (g.background !== 'auto') toolCfg.background = g.background
-      if (g.inputFidelity) toolCfg.input_fidelity = g.inputFidelity
+      if (!isGptImage2(model) && g.inputFidelity) toolCfg.input_fidelity = g.inputFidelity
       if (g.outputFormat) toolCfg.output_format = g.outputFormat
 
       res = await smartFetch(

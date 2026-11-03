@@ -55,6 +55,7 @@ import {
   STYLE_PRESETS,
 } from '@/services/aiGenerator'
 import { poseImagePath, poseThumbPath, referenceImageUrl, uploadedReferences } from '@/lib/recipeImages'
+import { isGptImage2 } from '@/lib/gptImage'
 import { useStudio } from '@/store/studioStore'
 import type {
   ComfyUiParams,
@@ -117,6 +118,7 @@ function StudioPage() {
   const activeProvider = apiConfig.activeProvider
   const providerMeta = PROVIDER_META[activeProvider]
   const providerCfg = apiConfig.providers[activeProvider]
+  const fixedInputFidelity = isGptImage2(providerCfg.model === 'custom' ? providerCfg.customModel : providerCfg.model)
 
   const activeWorkflowImages = activeProvider === 'comfyui' && recipe.workflowImagesIdentity === workflowIdentity(apiConfig.comfyuiParams.workflowJson) ? Object.values(recipe.workflowImages || {}) : []
   const defaultPrompt = buildRecipePrompt(recipe, apiConfig.stylePreset, activeWorkflowImages)
@@ -1122,7 +1124,9 @@ function StudioPage() {
                       </Select>
                     </Field>
                     <Field label="参考还原度 (input_fidelity)">
-                      <Select
+                      {fixedInputFidelity ? (
+                        <p className="text-sm text-muted-foreground">GPT Image 2 自动使用高还原度，无需设置。</p>
+                      ) : <Select
                         value={apiConfig.gptParams.inputFidelity}
                         onValueChange={(v) =>
                           updateGptParams({ inputFidelity: v as GptParams['inputFidelity'] })
@@ -1135,7 +1139,7 @@ function StudioPage() {
                           <SelectItem value="high">high</SelectItem>
                           <SelectItem value="low">low</SelectItem>
                         </SelectContent>
-                      </Select>
+                      </Select>}
                     </Field>
                     <Field label="背景模式 (background)">
                       <Select

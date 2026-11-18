@@ -1,3 +1,6 @@
+import { PIXAI_FLASH_MODEL } from '@/services/pixai'
+import { ReferenceComparisonDialog } from '@/components/common/ReferenceComparisonDialog'
+import { ImageViewer } from '@/components/common/ImageViewer'
 import { useQueryClient } from '@tanstack/react-query'
 import { createFileRoute, Link } from '@tanstack/react-router'
 import {
@@ -26,15 +29,16 @@ import {
   XIcon,
 } from 'lucide-react'
 import { type ChangeEvent, type DragEvent, useEffect, useMemo, useRef, useState } from 'react'
-import { toast } from 'sonner'
+import { toast } from '@/lib/notifications'
 import { costumesQuery, portraitsQuery, posesQuery } from '@/api/gallery'
 import { Field, Section } from '@/components/common/FormSection'
+import { ComfyConnectionStatus } from '@/components/studio/ComfyConnectionStatus'
 import { WorkflowParameters } from '@/components/studio/WorkflowParameters'
 import { applyWorkflowOverrides, validateReferenceCombinations, workflowIdentity } from '@/lib/comfyWorkflowParameters'
 import { PageHeader } from '@/components/common/PageHeader'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
@@ -55,16 +59,20 @@ import {
   STYLE_PRESETS,
 } from '@/services/aiGenerator'
 import { poseImagePath, poseThumbPath, referenceImageUrl, uploadedReferences } from '@/lib/recipeImages'
-import { omitsInputFidelity } from '@/lib/gptImage'
 import { useStudio } from '@/store/studioStore'
+import { getGptInputFidelity } from '@/lib/gptImageCapabilities'
+import type { RandomScope, ReferenceSlot } from '@/lib/randomRecipe'
+import { selectCostumeView } from '@/lib/costumeSources'
 import type {
   ComfyUiParams,
   DoubaoParams,
   GeminiParams,
+  GenerationHistoryItem,
   GptParams,
   ImagePassMode,
   ImageProviderId,
   QwenParams,
+  PixAiParams,
 } from '@/types/gallery'
 
 export const Route = createFileRoute('/studio')({
@@ -72,17 +80,17 @@ export const Route = createFileRoute('/studio')({
   component: StudioPage,
 })
 
-const PROVIDER_LIST: ImageProviderId[] = ['gemini', 'gpt', 'qwen', 'doubao', 'comfyui']
+const PROVIDER_LIST: ImageProviderId[] = ['gemini', 'gpt', 'qwen', 'doubao', 'pixai', 'comfyui']
 
 function StudioPage() {
   const {
+    hydrated, activeTask, resumeGeneration, stopTracking, abandonTask, recoverPixAiTask,
     recipe,
     apiConfig,
     history,
     customPrompt,
     setCustomPrompt,
     previewUrl,
-    setPreviewUrl,
     isGenerating,
     generatingModel,
     generationProgress,
@@ -97,32 +105,42 @@ function StudioPage() {
     updateExtraImageName,
     updateApiConfig,
     updateProviderConfig,
+    updatePixAiParams,
     updateGptParams,
     updateGeminiParams,
     updateQwenParams,
     updateDoubaoParams,
     updateComfyUiParams,
     randomizeRecipe,
+    randomizeSlot,
     removeHistoryItem,
     clearHistory,
   } = useStudio()
+  const [comparisonResult, setComparisonResult] = useState<GenerationHistoryItem | null>(null)
+  const previewResult = history.find((item) => item.imageUrl === previewUrl)
   const qc = useQueryClient()
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const comfyFileInputRef = useRef<HTMLInputElement | null>(null)
   const slotInputRef = useRef<HTMLInputElement | null>(null)
   const uploadSlotRef = useRef<'portrait' | 'costume' | 'pose'>('portrait')
   const [uploadingSlot, setUploadingSlot] = useState<string | null>(null)
+  const [randomizingSlot, setRandomizingSlot] = useState<ReferenceSlot | null>(null)
+  const [randomScopes, setRandomScopes] = useState<Record<ReferenceSlot, RandomScope>>({ portrait: 'similar', costume: 'similar', pose: 'similar' })
+  const costumeViews = recipe.costume?.views?.filter((view) => view.原图 && view.缩略图) || []
   const [showReferenceErrors, setShowReferenceErrors] = useState(false)
   const referenceErrorsRef = useRef<HTMLDivElement | null>(null)
 
   const activeProvider = apiConfig.activeProvider
   const providerMeta = PROVIDER_META[activeProvider]
   const providerCfg = apiConfig.providers[activeProvider]
-  const omitInputFidelity = omitsInputFidelity(providerCfg.model === 'custom' ? providerCfg.customModel : providerCfg.model)
+  const gptCfg = apiConfig.providers.gpt
+  const gptModel = gptCfg.model === 'custom' ? gptCfg.customModel.trim() : gptCfg.model
+  const supportsInputFidelity = Boolean(getGptInputFidelity(gptModel, 'high') || getGptInputFidelity(gptModel, 'low'))
 
   const activeWorkflowImages = activeProvider === 'comfyui' && recipe.workflowImagesIdentity === workflowIdentity(apiConfig.comfyuiParams.workflowJson) ? Object.values(recipe.workflowImages || {}) : []
-  const defaultPrompt = buildRecipePrompt(recipe, apiConfig.stylePreset, activeWorkflowImages)
+  const defaultPrompt = buildRecipePrompt(activeProvider === 'pixai' ? { ...recipe, extraImages: [] } : recipe, apiConfig.stylePreset, activeWorkflowImages)
   const prompt = customPrompt ?? defaultPrompt
+  const [recoveryTaskId, setRecoveryTaskId] = useState('')
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [extraUrlInput, setExtraUrlInput] = useState('')
   const [showUrlInput, setShowUrlInput] = useState(false)
@@ -276,13 +294,14 @@ function StudioPage() {
     { label: '人像', node: apiConfig.comfyuiParams.portraitNodeId, image: recipe.portrait },
     { label: '服装', node: apiConfig.comfyuiParams.costumeNodeId, image: recipe.costume },
     { label: '姿势', node: apiConfig.comfyuiParams.poseNodeId, image: recipe.pose },
-  ].filter((slot) => slot.node && slot.node !== 'none' && parsedComfyNodes.imageNodes.some((node) => node.id === slot.node && node.emptyValue === undefined) && !slot.image).map((slot) => slot.label) : []
+  ].filter((slot) => slot.node && slot.node !== 'none' && parsedComfyNodes.imageNodes.some((node) => node.id === slot.node && node.emptyValue === undefined) && !slot.image).map((slot) => slot.label) : activeProvider === 'pixai' ? [['人像', recipe.portrait], ['服装', recipe.costume], ['姿势', recipe.pose]].filter(([, image]) => !image).map(([label]) => String(label)) : []
 
   const extraImages = recipe.extraImages || []
   const hasStitchRefs = Boolean(recipe.portrait || recipe.costume || recipe.pose || extraImages.length > 0)
   const hasAnyRef = hasStitchRefs || activeWorkflowImages.length > 0
 
   const processFiles = async (files: File[]) => {
+    if (activeProvider === 'pixai') { toast.error('PixAI 仅支持三张独立参考图，请使用各槽位的上传按钮'); return }
     const imgFiles = files.filter((f) => f.type.startsWith('image/'))
     if (!imgFiles.length) return
     try {
@@ -327,6 +346,31 @@ function StudioPage() {
       portraits,
     })
   }
+
+  const handleRandomSlot = async (slot: ReferenceSlot) => {
+    const expectedId = recipe[slot]?.id ?? null
+    setRandomizingSlot(slot)
+    try {
+      const pools = slot === 'portrait' ? { portraits: await qc.ensureQueryData(portraitsQuery) }
+        : slot === 'costume' ? { costumes: await qc.ensureQueryData(costumesQuery) }
+        : { poses: (await qc.ensureQueryData(posesQuery)).items }
+      randomizeSlot(slot, randomScopes[slot], pools, expectedId)
+    } catch {
+      toast.error('素材库加载失败，请稍后重试')
+    } finally {
+      setRandomizingSlot(null)
+    }
+  }
+
+  const randomControls = (slot: ReferenceSlot, label: string) => <div className="flex basis-full flex-wrap items-center gap-2 border-t pt-2">
+    <Select value={randomScopes[slot]} onValueChange={(value) => setRandomScopes((current) => ({ ...current, [slot]: value as RandomScope }))}>
+      <SelectTrigger aria-label={`${label}换样范围`} className="min-h-11 w-24"><SelectValue /></SelectTrigger>
+      <SelectContent><SelectItem value="similar">同类</SelectItem><SelectItem value="all">全部</SelectItem></SelectContent>
+    </Select>
+    <Button type="button" variant="outline" className="min-h-11" disabled={uploadingSlot !== null || randomizingSlot !== null} onClick={() => void handleRandomSlot(slot)} aria-label={`${label}换一个`}>
+      {randomizingSlot === slot ? <LoaderCircleIcon className="size-4 animate-spin motion-reduce:animate-none" /> : <DicesIcon className="size-4" />}换一个
+    </Button>
+  </div>
 
   const handleUploadFiles = async (e: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || [])
@@ -383,10 +427,10 @@ function StudioPage() {
       <PageHeader
         title="AI 角色合成台"
         actions={
-          <Button variant="outline" size="sm" asChild>
+          activeProvider === 'comfyui' ? <ComfyConnectionStatus compact /> : <Button variant="outline" size="sm" asChild>
             <Link to="/settings">
               <KeyRoundIcon className="size-4" />
-              {providerCfg.apiKey ? `${providerMeta.shortName} 已就绪` : '配置 API Key'}
+              {providerCfg.apiKey.trim() ? `${providerMeta.shortName} 已配置` : '配置 API Key'}
             </Link>
           </Button>
         }
@@ -450,7 +494,7 @@ function StudioPage() {
             {/* 3 个核心图库槽位：手机端单列舒展展示，平板/桌面端三列并排 */}
             <div className="grid min-w-0 grid-cols-1 gap-2 @min-[42rem]/section:grid-cols-3">
               {/* 人像槽 */}
-              <div className={`relative flex min-w-0 items-start gap-2.5 rounded-xl bg-background p-2.5 ${showReferenceErrors && missingReferences.includes('人像') ? 'ring-1 ring-destructive' : ''}`}>
+              <div className={`relative flex min-w-0 flex-wrap items-start gap-2.5 rounded-xl bg-background p-2.5 ${showReferenceErrors && missingReferences.includes('人像') ? 'ring-1 ring-destructive' : ''}`}>
                 {recipe.portrait ? (
                   <>
                     <button type="button" aria-label="放大人像参考图" className="shrink-0 cursor-zoom-in overflow-hidden rounded-lg transition-opacity hover:opacity-80 focus-visible:outline-2 focus-visible:outline-ring" onClick={() => {
@@ -491,16 +535,17 @@ function StudioPage() {
                       </div>
                       <span className="truncate text-xs">+ 选人像</span>
                     </Link>
-                    <Button type="button" variant="ghost" size="sm" aria-label="上传人像参考图" aria-describedby={showReferenceErrors && missingReferences.includes('人像') ? 'reference-errors' : undefined} aria-busy={uploadingSlot === 'portrait'} disabled={uploadingSlot !== null} className="h-12 shrink-0 border-l px-2 text-xs" onClick={() => { uploadSlotRef.current = 'portrait'; slotInputRef.current?.click() }}>
+                    <Button type="button" variant="ghost" size="sm" aria-label="上传人像参考图" aria-describedby={showReferenceErrors && missingReferences.includes('人像') ? 'reference-errors' : undefined} aria-busy={uploadingSlot === 'portrait'} disabled={uploadingSlot !== null || randomizingSlot !== null} className="h-12 shrink-0 border-l px-2 text-xs" onClick={() => { uploadSlotRef.current = 'portrait'; slotInputRef.current?.click() }}>
                       {uploadingSlot === 'portrait' ? <LoaderCircleIcon className="size-3.5 animate-spin motion-reduce:animate-none" /> : <ImagePlusIcon className="size-3.5" />}
                       {uploadingSlot === 'portrait' ? '处理中' : '上传'}
                     </Button>
                   </>
                 )}
+                {randomControls('portrait', '人像')}
               </div>
 
               {/* 服装槽 */}
-              <div className={`relative flex min-w-0 items-start gap-2.5 rounded-xl bg-background p-2.5 ${showReferenceErrors && missingReferences.includes('服装') ? 'ring-1 ring-destructive' : ''}`}>
+              <div className={`relative flex min-w-0 flex-wrap items-start gap-2.5 rounded-xl bg-background p-2.5 ${showReferenceErrors && missingReferences.includes('服装') ? 'ring-1 ring-destructive' : ''}`}>
                 {recipe.costume ? (
                   <>
                     <button type="button" aria-label="放大服装参考图" className="shrink-0 cursor-zoom-in overflow-hidden rounded-lg transition-opacity hover:opacity-80 focus-visible:outline-2 focus-visible:outline-ring" onClick={() => {
@@ -528,6 +573,16 @@ function StudioPage() {
                       <div className="line-clamp-2 text-xs font-medium leading-snug" title={recipe.costume.服装名称}>
                         {recipe.costume.服装名称}
                       </div>
+                      {costumeViews.length > 0 && <Select
+                        value={costumeViews.find((view) => view.id === recipe.costume?.selectedView)?.id || costumeViews.find((view) => view.id === 'front')?.id || costumeViews[0].id}
+                        disabled={uploadingSlot !== null || randomizingSlot !== null}
+                        onValueChange={(value) => {
+                          if (recipe.costume && uploadingSlot === null && randomizingSlot === null) setCostume(selectCostumeView(recipe.costume, value))
+                        }}
+                      >
+                        <SelectTrigger aria-label="已选服装视角" className="h-8 w-full text-xs"><SelectValue /></SelectTrigger>
+                        <SelectContent>{costumeViews.map((view) => <SelectItem key={view.id} value={view.id}>{view.label}</SelectItem>)}</SelectContent>
+                      </Select>}
                     </div>
                   </>
                 ) : (
@@ -541,16 +596,17 @@ function StudioPage() {
                       </div>
                       <span className="truncate text-xs">+ 选服装</span>
                     </Link>
-                    <Button type="button" variant="ghost" size="sm" aria-label="上传服装参考图" aria-describedby={showReferenceErrors && missingReferences.includes('服装') ? 'reference-errors' : undefined} aria-busy={uploadingSlot === 'costume'} disabled={uploadingSlot !== null} className="h-12 shrink-0 border-l px-2 text-xs" onClick={() => { uploadSlotRef.current = 'costume'; slotInputRef.current?.click() }}>
+                    <Button type="button" variant="ghost" size="sm" aria-label="上传服装参考图" aria-describedby={showReferenceErrors && missingReferences.includes('服装') ? 'reference-errors' : undefined} aria-busy={uploadingSlot === 'costume'} disabled={uploadingSlot !== null || randomizingSlot !== null} className="h-12 shrink-0 border-l px-2 text-xs" onClick={() => { uploadSlotRef.current = 'costume'; slotInputRef.current?.click() }}>
                       {uploadingSlot === 'costume' ? <LoaderCircleIcon className="size-3.5 animate-spin motion-reduce:animate-none" /> : <ImagePlusIcon className="size-3.5" />}
                       {uploadingSlot === 'costume' ? '处理中' : '上传'}
                     </Button>
                   </>
                 )}
+                {randomControls('costume', '服装')}
               </div>
 
               {/* 姿势槽 */}
-              <div className={`relative flex min-w-0 items-start gap-2.5 rounded-xl bg-background p-2.5 ${showReferenceErrors && missingReferences.includes('姿势') ? 'ring-1 ring-destructive' : ''}`}>
+              <div className={`relative flex min-w-0 flex-wrap items-start gap-2.5 rounded-xl bg-background p-2.5 ${showReferenceErrors && missingReferences.includes('姿势') ? 'ring-1 ring-destructive' : ''}`}>
                 {recipe.pose ? (
                   <>
                     <button type="button" aria-label="放大姿势参考图" className="shrink-0 cursor-zoom-in overflow-hidden rounded-lg transition-opacity hover:opacity-80 focus-visible:outline-2 focus-visible:outline-ring" onClick={() => {
@@ -630,12 +686,13 @@ function StudioPage() {
                       </div>
                       <span className="truncate text-xs">+ 选姿势</span>
                     </Link>
-                    <Button type="button" variant="ghost" size="sm" aria-label="上传姿势参考图" aria-describedby={showReferenceErrors && missingReferences.includes('姿势') ? 'reference-errors' : undefined} aria-busy={uploadingSlot === 'pose'} disabled={uploadingSlot !== null} className="h-12 shrink-0 border-l px-2 text-xs" onClick={() => { uploadSlotRef.current = 'pose'; slotInputRef.current?.click() }}>
+                    <Button type="button" variant="ghost" size="sm" aria-label="上传姿势参考图" aria-describedby={showReferenceErrors && missingReferences.includes('姿势') ? 'reference-errors' : undefined} aria-busy={uploadingSlot === 'pose'} disabled={uploadingSlot !== null || randomizingSlot !== null} className="h-12 shrink-0 border-l px-2 text-xs" onClick={() => { uploadSlotRef.current = 'pose'; slotInputRef.current?.click() }}>
                       {uploadingSlot === 'pose' ? <LoaderCircleIcon className="size-3.5 animate-spin motion-reduce:animate-none" /> : <ImagePlusIcon className="size-3.5" />}
                       {uploadingSlot === 'pose' ? '处理中' : '上传'}
                     </Button>
                   </>
                 )}
+                {randomControls('pose', '姿势')}
               </div>
             </div>
 
@@ -675,7 +732,9 @@ function StudioPage() {
                 </div>
               )}
 
+              {activeProvider === 'pixai' && <p className="text-xs text-muted-foreground">PixAI 需要人像、服装、姿势各一张，按此顺序上传，不发送拼图。{extraImages.length > 0 ? '请先移除上方附加图后生成。' : '附加图已禁用，请使用各槽位的上传按钮。'}</p>}
               {/* 显式虚线上传/拖拽/粘贴提示区 */}
+              {activeProvider !== 'pixai' && <>
               <div
                 onClick={() => fileInputRef.current?.click()}
                 className={`flex cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border border-dashed px-3 py-2.5 text-center transition sm:flex-row sm:justify-between ${
@@ -719,6 +778,7 @@ function StudioPage() {
                   </Button>
                 </div>
               )}
+              </>}
             </div>
           </Section>
 
@@ -902,6 +962,31 @@ function StudioPage() {
                 )}
               </>
             )}
+
+            {activeProvider === 'pixai' && <>
+              <Field label="输出比例">
+                <Select value={apiConfig.pixaiParams.aspectRatio} onValueChange={(value) => updatePixAiParams({ aspectRatio: value as PixAiParams['aspectRatio'] })}>
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>{['1:1', '2:3', '3:2', '3:4', '4:3', '3:5', '5:3', '9:16', '16:9', '1:3', '3:1'].map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent>
+                </Select>
+              </Field>
+              <Field label="分辨率">
+                <Select value={apiConfig.pixaiParams.size} onValueChange={(value) => updatePixAiParams({ size: value as PixAiParams['size'] })}>
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>{['1k', '1.5k'].map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent>
+                </Select>
+              </Field>
+              <Field label="生成模式" hint="可用模式取决于模型和账号，不支持时会显示接口错误">
+                <Select value={apiConfig.pixaiParams.mode} onValueChange={(value) => updatePixAiParams({ mode: value as PixAiParams['mode'] })}>
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>{(providerCfg.model === PIXAI_FLASH_MODEL ? ['default'] : ['default', 'pro', 'ultra']).map((value) => <SelectItem key={value} value={value}>{value === 'default' ? '模型默认' : value}</SelectItem>)}</SelectContent>
+                </Select>
+              </Field>
+              {showAdvanced && <>
+                {providerCfg.model !== PIXAI_FLASH_MODEL ? <Field label="负向提示词"><Textarea value={apiConfig.pixaiParams.negativePrompt} onChange={(e) => updatePixAiParams({ negativePrompt: e.target.value })} /></Field> : <p className="text-xs text-muted-foreground">Flash 不使用负向提示词。</p>}
+                <Field label="Seed（留空为随机）"><Input type="number" step="1" value={apiConfig.pixaiParams.seed ?? ''} onChange={(e) => updatePixAiParams({ seed: e.target.value === '' ? undefined : Number(e.target.value) })} /></Field>
+              </>}
+            </>}
 
             <Field label="画风预设">
               <Select
@@ -1123,10 +1208,9 @@ function StudioPage() {
                         </SelectContent>
                       </Select>
                     </Field>
-                    <Field label="参考还原度 (input_fidelity)">
-                      {omitInputFidelity ? (
-                        <p className="text-sm text-muted-foreground">当前模型不支持此参数，无需设置。</p>
-                      ) : <Select
+                    <Field label="参考还原度 (input_fidelity)" hint={supportsInputFidelity ? undefined : '当前模型使用默认参考还原度，无需设置此参数。'}>
+                      <Select
+                        disabled={!supportsInputFidelity}
                         value={apiConfig.gptParams.inputFidelity}
                         onValueChange={(v) =>
                           updateGptParams({ inputFidelity: v as GptParams['inputFidelity'] })
@@ -1139,7 +1223,7 @@ function StudioPage() {
                           <SelectItem value="high">high</SelectItem>
                           <SelectItem value="low">low</SelectItem>
                         </SelectContent>
-                      </Select>}
+                      </Select>
                     </Field>
                     <Field label="背景模式 (background)">
                       <Select
@@ -1326,7 +1410,7 @@ function StudioPage() {
                   </>
                 )}
 
-                {activeProvider !== 'comfyui' && (
+                {activeProvider !== 'comfyui' && activeProvider !== 'pixai' && (
                   <>
                     <Field label="图片传参方式">
                       <Select
@@ -1393,7 +1477,7 @@ function StudioPage() {
 
             <Button
               onClick={handleGenerate}
-              disabled={isGenerating || uploadingSlot !== null}
+              disabled={!hydrated || !!activeTask || isGenerating || uploadingSlot !== null}
               className="h-11 w-full text-sm font-semibold"
             >
               {isGenerating ? (
@@ -1412,7 +1496,7 @@ function StudioPage() {
         </div>
 
         {/* 右栏：专注展示 AI 生成结果与生成状态 */}
-        <div className="min-w-0 lg:col-span-5">
+        <div className="min-w-0 space-y-4 lg:col-span-5">
           <Section
             title="生成结果"
             className="@lg/section:grid-cols-1"
@@ -1427,6 +1511,7 @@ function StudioPage() {
               ) : null
             }
           >
+            {previewResult && !isGenerating && <Button className="min-h-11" variant="outline" onClick={() => setComparisonResult(previewResult)}>对比参考</Button>}
             <div className="relative flex min-h-[340px] items-center justify-center overflow-hidden rounded-2xl bg-background p-4 sm:min-h-[460px]">
               {isGenerating ? (
                 <div className="flex flex-col items-center gap-3 text-center">
@@ -1443,6 +1528,7 @@ function StudioPage() {
                     {generationProgress && (
                       <div className="w-56 max-w-full space-y-1.5 pt-1">
                         <div className="text-xs text-foreground/80">{generationProgress.message}</div>
+                        {generationProgress.connection && <p className="text-xs text-muted-foreground">连接：{{connecting: 'WebSocket 连接中', connected: 'WebSocket 已连接', reconnecting: 'WebSocket 重连中，HTTP 保底跟踪', degraded: 'WebSocket 暂不可用，HTTP 保底跟踪'}[generationProgress.connection]}</p>}
                         {generationProgress.percent !== undefined && (
                           <div className="h-1.5 overflow-hidden rounded-full bg-muted">
                             <div
@@ -1472,13 +1558,7 @@ function StudioPage() {
                   )}
                 </div>
               ) : previewUrl ? (
-                <img
-                  src={previewUrl}
-                  alt="生成结果"
-                  onClick={() => setZoomImageUrl(previewUrl)}
-                  title="点击放大查看"
-                  className="max-h-[480px] w-auto cursor-zoom-in rounded-xl object-contain transition hover:opacity-95"
-                />
+                <button type="button" aria-label="放大生成结果" onClick={() => setZoomImageUrl(previewUrl)} className="cursor-zoom-in rounded-xl focus-visible:outline-2 focus-visible:outline-ring"><img src={previewUrl} alt="生成结果" className="max-h-[480px] w-auto rounded-xl object-contain transition hover:opacity-95" /></button>
               ) : (
                 <div className="flex flex-col items-center gap-2 text-center text-muted-foreground">
                   <SparklesIcon className="size-7 opacity-35" />
@@ -1487,6 +1567,18 @@ function StudioPage() {
               )}
             </div>
           </Section>
+          {activeTask && <Section title="待确认任务" className="@lg/section:grid-cols-1">
+            <p className="break-all text-xs">{activeTask.task ? `任务 ${(activeTask.task.provider === 'pixai' ? activeTask.task.taskId : activeTask.task.promptId)}：刷新后查询原任务，不重复提交。` : '提交结果未知或提交前被中断，请核对后端队列；不会自动重试提交。'}</p>
+            {!activeTask.task && activeTask.provider === 'pixai' && <div className="flex flex-wrap gap-2">
+              <Input aria-label="PixAI 任务编号" placeholder="已确认的 PixAI 任务编号" value={recoveryTaskId} onChange={(e) => setRecoveryTaskId(e.target.value)} />
+              <Button disabled={isGenerating || !recoveryTaskId.trim()} onClick={() => void recoverPixAiTask(recoveryTaskId)}>按编号恢复（只查询）</Button>
+            </div>}
+            <div className="flex flex-wrap gap-2">
+              <Button disabled={isGenerating || !activeTask.task} onClick={() => void resumeGeneration()}>恢复跟踪</Button>
+              <Button variant="outline" disabled={!isGenerating} onClick={() => void stopTracking()}>暂停跟踪（保留记录）</Button>
+              <Button variant="outline" disabled={isGenerating} onClick={() => void abandonTask()}>放弃记录（不取消服务器任务）</Button>
+            </div>
+          </Section>}
         </div>
       </div>
 
@@ -1507,13 +1599,8 @@ function StudioPage() {
               key={h.id}
               className="group flex flex-col justify-between overflow-hidden rounded-2xl bg-background p-2"
             >
-              <div
-                onClick={() => {
-                  setPreviewUrl(h.imageUrl)
-                  setZoomImageUrl(h.imageUrl)
-                }}
-                className="relative aspect-3/4 cursor-zoom-in overflow-hidden rounded-xl bg-muted"
-              >
+              <div className="relative aspect-3/4 overflow-hidden rounded-xl bg-muted">
+                <button type="button" aria-label={`查看生成记录：${h.recipeSummary}`} onClick={() => setZoomImageUrl(h.imageUrl)} className="block h-full w-full cursor-zoom-in focus-visible:outline-2 focus-visible:outline-ring">
                 <img
                   src={h.imageUrl}
                   alt={h.recipeSummary}
@@ -1522,6 +1609,7 @@ function StudioPage() {
                 <span className="absolute bottom-1.5 left-1.5 max-w-[calc(100%-12px)] truncate rounded-md bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-white">
                   {h.model}
                 </span>
+                </button>
                 <button
                   type="button"
                   onClick={(e) => {
@@ -1537,6 +1625,7 @@ function StudioPage() {
 
               <div className="mt-2 space-y-1.5 px-0.5">
                 <div className="truncate text-xs font-medium">{h.recipeSummary}</div>
+                <Button variant="outline" className="min-h-11 w-full" onClick={() => setComparisonResult(h)}>对比参考</Button>
                 <div className="grid grid-cols-2 gap-1.5">
                   <button
                     type="button"
@@ -1562,31 +1651,9 @@ function StudioPage() {
         </Section>
       )}
 
+      <ReferenceComparisonDialog result={comparisonResult} open={comparisonResult !== null} onOpenChange={(open) => !open && setComparisonResult(null)} />
       {/* 生成结果全屏放大灯箱 */}
-      <Dialog open={Boolean(zoomImageUrl)} onOpenChange={(o) => !o && setZoomImageUrl(null)}>
-        <DialogContent className="max-h-[92dvh] w-[95vw] max-w-4xl overflow-y-auto p-4 sm:max-w-4xl">
-          <DialogHeader className="flex flex-row flex-wrap items-center justify-between gap-3 pr-8">
-            <div><DialogTitle className="text-base">图片大图预览</DialogTitle><DialogDescription className="sr-only">参考图片或生成结果的放大预览。按 Esc 或关闭按钮返回。</DialogDescription></div>
-            {zoomImageUrl && (
-              <Button size="sm" variant="outline" asChild>
-                <a href={zoomImageUrl} download="image.png">
-                  <DownloadIcon className="size-3.5" />
-                  下载原图
-                </a>
-              </Button>
-            )}
-          </DialogHeader>
-          {zoomImageUrl && (
-            <div className="mt-2 flex items-center justify-center overflow-hidden rounded-xl bg-muted/60 p-2">
-              <img
-                src={zoomImageUrl}
-                alt="大图预览"
-                className="max-h-[78dvh] w-auto rounded-lg object-contain"
-              />
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
+      <ImageViewer imageUrl={zoomImageUrl || ''} open={Boolean(zoomImageUrl)} onOpenChange={(open) => !open && setZoomImageUrl(null)} />
 
       {/* 参考拼图独立弹窗（不占用主画布） */}
       <Dialog open={Boolean(stitchModalUrl)} onOpenChange={(o) => !o && setStitchModalUrl(null)}>

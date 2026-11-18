@@ -1,6 +1,5 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import {
-  ActivityIcon,
   CheckIcon,
   ExternalLinkIcon,
   EyeIcon,
@@ -10,44 +9,34 @@ import {
   SparklesIcon,
 } from 'lucide-react'
 import { useState } from 'react'
-import { toast } from 'sonner'
+import { toast } from '@/lib/notifications'
 import { Field, Section } from '@/components/common/FormSection'
 import { PageHeader } from '@/components/common/PageHeader'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import { detectComfyUi, PROVIDER_META, testComfyConnection } from '@/services/aiGenerator'
+import { detectComfyUi, PROVIDER_META } from '@/services/aiGenerator'
 import { useStudio } from '@/store/studioStore'
 import type { ImagePassMode, ImageProviderId } from '@/types/gallery'
+import { ComfyConnectionStatus } from '@/components/studio/ComfyConnectionStatus'
+import { COMFY_CONNECTION_LABELS } from '@/store/useComfyConnection'
 
 export const Route = createFileRoute('/settings')({
   staticData: { title: 'API 配置' },
   component: SettingsPage,
 })
 
-const PROVIDER_ORDER: ImageProviderId[] = ['gemini', 'gpt', 'qwen', 'doubao', 'comfyui']
+const PROVIDER_ORDER: ImageProviderId[] = ['gemini', 'gpt', 'qwen', 'doubao', 'pixai', 'comfyui']
 
 function SettingsPage() {
-  const { apiConfig, updateApiConfig, updateProviderConfig } = useStudio()
+  const { apiConfig, updateApiConfig, updateProviderConfig, comfyConnection } = useStudio()
   const [showKey, setShowKey] = useState(false)
   const [testingComfy, setTestingComfy] = useState(false)
 
   const pid = apiConfig.activeProvider
   const meta = PROVIDER_META[pid]
   const pCfg = apiConfig.providers[pid]
-
-  const handleTestComfy = async () => {
-    setTestingComfy(true)
-    try {
-      const info = await testComfyConnection(pCfg.baseUrl, pCfg.apiKey)
-      toast.success(`连接成功：${info}`)
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : '连接失败', { duration: 10000 })
-    } finally {
-      setTestingComfy(false)
-    }
-  }
 
   const handleDetectComfy = async () => {
     setTestingComfy(true)
@@ -100,17 +89,20 @@ function SettingsPage() {
                   : 'border-border/60 bg-card hover:bg-muted/40'
               }`}
             >
-              <span className="truncate text-xs sm:text-sm">{itemMeta.name}</span>
+              <span className="min-w-0"><span className="block truncate text-sm">{itemMeta.name}</span><span className="block text-xs font-normal text-muted-foreground">{id === 'comfyui' ? COMFY_CONNECTION_LABELS[comfyConnection.status] : hasKey ? '已配置' : '未配置 Key'}</span></span>
               <span
+                aria-hidden="true"
                 className={`size-2 shrink-0 rounded-full ${
-                  hasKey ? 'bg-emerald-500' : 'bg-muted-foreground/30'
+                  id === 'comfyui' && comfyConnection.status === 'connected' ? 'bg-emerald-500' : hasKey ? 'bg-amber-500' : 'bg-muted-foreground/30'
                 }`}
-                title={hasKey ? '已就绪' : '未配置 Key'}
+                title={id === 'comfyui' ? COMFY_CONNECTION_LABELS[comfyConnection.status] : hasKey ? '已配置，尚未检测' : '未配置 Key'}
               />
             </button>
           )
         })}
       </div>
+
+      {pid === 'comfyui' && <ComfyConnectionStatus />}
 
       {/* 当前厂商连接配置 */}
       <Section
@@ -122,10 +114,6 @@ function SettingsPage() {
                 <Button variant="outline" size="sm" onClick={handleDetectComfy} disabled={testingComfy}>
                   <ScanSearchIcon className="size-3.5" />
                   自动识别
-                </Button>
-                <Button variant="outline" size="sm" onClick={handleTestComfy} disabled={testingComfy}>
-                  <ActivityIcon className="size-3.5" />
-                  {testingComfy ? '检测中…' : '测试连接'}
                 </Button>
               </>
             )}
@@ -161,6 +149,7 @@ function SettingsPage() {
           }
         >
           <Input
+            disabled={pid === 'pixai'}
             type={pid === 'comfyui' ? 'text' : 'url'}
             value={pCfg.baseUrl}
             onChange={(e) => updateProviderConfig(pid, { baseUrl: e.target.value })}
@@ -228,9 +217,10 @@ function SettingsPage() {
       )}
 
       {/* 全局传输设置 */}
+      {pid === 'pixai' && <p className="text-sm text-muted-foreground">支持 Tsubaki.3 和 Tsubaki.3 Flash，每次输出一张。人像、服装、姿势各一图，按原始图片上传；默认启用本站代理。Key 随请求发送到本站代理与 PixAI，请仅在可信部署上使用。</p>}
       {pid !== 'comfyui' && (
         <Section title="全局请求选项">
-          <Field label="参考图传参方式">
+          {pid !== 'pixai' && <Field label="参考图传参方式">
             <Select
               value={apiConfig.imagePassMode}
               onValueChange={(v) => updateApiConfig({ imagePassMode: v as ImagePassMode })}
@@ -243,11 +233,11 @@ function SettingsPage() {
                 <SelectItem value="base64">转 Base64 编码传输</SelectItem>
               </SelectContent>
             </Select>
-          </Field>
+          </Field>}
 
           <Field
             label="服务端 CORS 代理 (/api/proxy)"
-            hint="默认关闭（浏览器直连）；切换到阿里云百炼 (Qwen) 或火山方舟 (Doubao) 时会自动开启。仅支持白名单域名（可通过服务端环境变量 PROXY_ALLOWED_ORIGINS 扩展）"
+            hint="默认关闭（浏览器直连）；切换到阿里云百炼 (Qwen)、火山方舟 (Doubao) 或 PixAI 时会自动开启。仅支持白名单域名（可通过服务端环境变量 PROXY_ALLOWED_ORIGINS 扩展）"
           >
             <div className="flex h-9 items-center justify-between rounded-xl border bg-background px-3">
               <span className="text-xs text-muted-foreground">
